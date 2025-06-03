@@ -80,32 +80,49 @@ class TensorDatasetWrapper(Dataset):
 
     def __len__(self):
         return len(self.x)
+        
 
+def masked_mse_loss(output, target,mask):
+    # Compute loss only on masked regions (where noise is introduced)
+    loss = (output - target) ** 2
+    loss = loss * (mask)  # Apply mask to focus on noisy regions
+    return loss.sum() / (mask).sum()  # Normalize by the number of masked (noisy) values
+    
 def train_autoencoder(model, train_loader, val_loader, nepochs=500, patience=50):
     optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    criterion = nn.MSELoss()
+    
     best_loss = float('inf')
     no_improve = 0
 
     for epoch in range(nepochs):
         model.train()
         train_loss = 0
-        for fea, lab in train_loader:
-            fea, lab = fea.to(device), lab.to(device)
-            output = model(fea)
-            loss = criterion(output, lab)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
+        for i in train_loader:
+            fea,lab = i
+            fea = fea.to(device)
+            lab = lab.to(device)
+            zeromask = (lab != 0).float().to(device)
+            #lab = lab.squeeze(1)  此处lab为X_initial
+            outputs = model(fea)
+            re_loss = masked_mse_loss(outputs, lab, mask=zeromask)
+            if torch.cuda.is_available():
+                re_loss = re_loss.to(device)
+            goptimizer.zero_grad()
+            re_loss.backward()
+            goptimizer.step()
+            train_loss = re_loss+train_loss
 
         model.eval()
         val_loss = 0
         with torch.no_grad():
             for fea, lab in val_loader:
-                fea, lab = fea.to(device), lab.to(device)
-                output = model(fea)
-                val_loss += criterion(output, lab).item()
+                fea,lab = i
+                fea = fea.to(device)
+                lab = lab.to(device)
+                zeromask = (lab != 0).float().to(device)
+                #lab = lab.squeeze(1)
+                outputs= model(fea)
+                val_loss += masked_mse_loss(outputs, lab,zeromask).item()
 
         avg_val_loss = val_loss / len(val_loader)
         print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
@@ -366,24 +383,24 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-svm_model = svm.SVC(kernel='rbf', decision_function_shape='ovr')  # 默认参数
+svm_model = svm.SVC(kernel='rbf', decision_function_shape='ovr')  
 svm_model.fit(X_train, y_train)
 
 
 y_pred = svm_model.predict(X_val)
-print('预训练下的有监督学习')
+
 print(classification_report(y_val, y_pred, digits=4))
 report_dict = classification_report(y_val, y_pred, digits=4, output_dict=True)
 
 
 df_report = pd.DataFrame(report_dict).transpose().reset_index()
-df_report.columns = ['Class'] + list(df_report.columns[1:])  # 重命名首列为"Class"
+df_report.columns = ['Class'] + list(df_report.columns[1:]) 
 
 
-subtype_labels = ['Basal', 'Her2', 'LumA', 'LumB', 'Normal']  # 替换为实际亚型名称
+subtype_labels = ['Basal', 'Her2', 'LumA', 'LumB', 'Normal']  
 if len(subtype_labels) == 5:
     df_report['Class'] = df_report['Class'].astype(str)
-    df_report.loc[:4, 'Class'] = subtype_labels  # 前5行为具体亚型
+    df_report.loc[:4, 'Class'] = subtype_labels  
 
 
 df_report.round(4).to_csv('BRCA_molecular_subtype_finetune/brca_finetune.csv', index=False)
@@ -600,7 +617,7 @@ survival_df = pd.DataFrame(finetune_X_encoded)
 survival_df['time'] = OStime.values
 survival_df['event'] = OSevent.values
 
-###mask---
+
 val_encoded_feature = []
 with torch.no_grad():
     fea = MMOAE.encoder(val_tensor)
@@ -637,9 +654,9 @@ def cox_feature_selection(X_data, survival_df, alpha=0.05):
         
         if p_value < alpha:
             significant_indices.append(i)
-            print(f"{feature_name}: p值 = {p_value:.4f} - 显著")
+            print(f"{feature_name}: p_value = {p_value:.4f} - significant")
         else:
-            print(f"{feature_name}: p值 = {p_value:.4f} - 不显著")
+            print(f"{feature_name}: p值 = {p_value:.4f} - no significant")
     
    
     if len(significant_indices) == 0:
@@ -649,7 +666,7 @@ def cox_feature_selection(X_data, survival_df, alpha=0.05):
     
     significant_features = X_data[:, significant_indices]
     
-    print(f"\n筛选结果: 从{X_data.shape[1]}个特征中保留了{len(significant_indices)}个显著特征 (p < {alpha})")
+    
     return significant_features, significant_indices
 
 
@@ -723,7 +740,7 @@ def KM_plot(survival_df, cluster_labels, c_index, c_index_std):
 
     
 def log_ranktest(survival_df, cluster_labels):
-    print("\n不同分子分型间的Log-Rank检验结果:")
+    
     survival_df = survival_df.copy()
     survival_df['Cluster'] = cluster_labels
     
@@ -737,17 +754,14 @@ def log_ranktest(survival_df, cluster_labels):
         survival_df['event']
     )
     
-    print(f"整体Log-Rank检验结果:")
-    print(f"检验统计量: {results.test_statistic:.4f}")
     
-    print(f"p值: {results.p_value:.4f}")
     
     
     
     results_table = []    
     results_table.append({
-    '统计量': results.test_statistic,
-    'p值': results.p_value})
+    'Statistics': results.test_statistic,
+    'p_value': results.p_value})
         
 
 
@@ -776,7 +790,7 @@ def cv_cindex(significant_features, cv=5):
         c_idx = concordance_index(test_data['time'], -pred, test_data['event'])
         cv_c_indices.append(c_idx)
 
-    print(f"5折交叉验证的平均C-index: {np.mean(cv_c_indices):.4f} (标准差: {np.std(cv_c_indices):.4f})")
+    print(f"5_cv_C-index: {np.mean(cv_c_indices):.4f} (SDerror: {np.std(cv_c_indices):.4f})")
     return np.mean(cv_c_indices), np.std(cv_c_indices)
 
 
@@ -786,15 +800,15 @@ def cv_cindex(significant_features, cv=5):
 def main(X_encoded, survival_df, max_clusters=10):
     significant_features, significant_indices = cox_feature_selection(X_encoded, survival_df)
     n_clusters = find_optimal_clusters(significant_features, max_clusters)
-    print(f"\n最佳聚类数: {n_clusters}")
+    
     cluster_labels, kmeans = apply_kmeans(significant_features, n_clusters)
     
     cindex_mean, cindex_std = cv_cindex(significant_features, cv=5)
     
     unique_clusters, counts = np.unique(cluster_labels, return_counts=True)
-    print("\n聚类分布:")
+    
     for cluster, count in zip(unique_clusters, counts):
-        print(f"聚类 {cluster}: {count} 个样本")
+        
     KM_plot(survival_df, cluster_labels,cindex_mean, cindex_std)
     
     table = log_ranktest(survival_df, cluster_labels)
@@ -831,10 +845,10 @@ def pretrain_KM_plot(survival_df, cluster_labels, c_index, c_index_std):
     plt.grid(alpha=0.3)
     plt.legend(fontsize=12)
 
-    # 添加 C-index 文本（调整 y 坐标）
+    
     c_text = f"C-index = {c_index:.3f} ± {c_index_std:.3f}"
     plt.text(
-        0.5, 0.02,  # 调整 y 坐标（0.02 靠近底部）
+        0.5, 0.02,  
         c_text,
         ha='center', va='center',
         transform=plt.gca().transAxes,
@@ -842,43 +856,38 @@ def pretrain_KM_plot(survival_df, cluster_labels, c_index, c_index_std):
         bbox=dict(facecolor='white', alpha=0.8)
     )
 
-    # 调整画布底部空间（可选）
-    plt.subplots_adjust(bottom=0.15)  # 预留更多底部空间
     
-    plt.tight_layout()  # 在 plt.text() 之后调用
+    plt.subplots_adjust(bottom=0.15)  
+    
+    plt.tight_layout()  
     plt.savefig('COADREAD/pretrain_Kaplan-Meier_curve.tif', dpi=300, bbox_inches='tight')
 
 
 
 def pretrain_log_ranktest(survival_df, cluster_labels):
-    print("\n不同分子分型间的Log-Rank检验结果:")
+    
     survival_df = survival_df.copy()
     survival_df['Cluster'] = cluster_labels
     
-    # 使用多组比较的Log-Rank检验(而非两两比较)
+    
     from lifelines.statistics import multivariate_logrank_test
     
-    # 进行整体的Log-Rank检验
+   
     results = multivariate_logrank_test(
         survival_df['time'], 
         survival_df['Cluster'], 
         survival_df['event']
     )
     
-    print(f"整体Log-Rank检验结果:")
-    print(f"检验统计量: {results.test_statistic:.4f}")
     
-    print(f"p值: {results.p_value:.4f}")
-    
-    # 返回结果以便进一步使用
     
     results_table = []    
     results_table.append({
-    '统计量': results.test_statistic,
-    'p值': results.p_value})
+    'Statistics': results.test_statistic,
+    'p_value': results.p_value})
         
 
-# 将Log-Rank检验结果转换为DataFrame并保存
+
     logrank_results = pd.DataFrame(results_table)
     logrank_results.to_csv('COADREAD/pretrain_logrank_test_results.csv', index=False, encoding='utf_8_sig')
     return results_table
@@ -888,15 +897,15 @@ def pretrain_log_ranktest(survival_df, cluster_labels):
 def nonfinetune_compute(X_encoded, survival_df, max_clusters=10):
     significant_features, significant_indices = cox_feature_selection(X_encoded, survival_df)
     n_clusters = opti_clusters
-    print(f"\n最佳聚类数: {n_clusters}")
+   
     cluster_labels, kmeans = apply_kmeans(significant_features, n_clusters)
     
     cindex_mean, cindex_std = cv_cindex(significant_features, cv=5)
     
     unique_clusters, counts = np.unique(cluster_labels, return_counts=True)
-    print("\n聚类分布:")
+    
     for cluster, count in zip(unique_clusters, counts):
-        print(f"聚类 {cluster}: {count} 个样本")
+        
     pretrain_KM_plot(survival_df, cluster_labels,cindex_mean, cindex_std)
     
     table = pretrain_log_ranktest(survival_df, cluster_labels)
@@ -935,10 +944,10 @@ def PCA_KM_plot(survival_df, cluster_labels, c_index, c_index_std):
     plt.grid(alpha=0.3)
     plt.legend(fontsize=12)
 
-    # 添加 C-index 文本（调整 y 坐标）
+    
     c_text = f"C-index = {c_index:.3f} ± {c_index_std:.3f}"
     plt.text(
-        0.5, 0.02,  # 调整 y 坐标（0.02 靠近底部）
+        0.5, 0.02,  
         c_text,
         ha='center', va='center',
         transform=plt.gca().transAxes,
@@ -946,43 +955,38 @@ def PCA_KM_plot(survival_df, cluster_labels, c_index, c_index_std):
         bbox=dict(facecolor='white', alpha=0.8)
     )
 
-    # 调整画布底部空间（可选）
-    plt.subplots_adjust(bottom=0.15)  # 预留更多底部空间
     
-    plt.tight_layout()  # 在 plt.text() 之后调用
+    plt.subplots_adjust(bottom=0.15)  
+    
+    plt.tight_layout()  
     plt.savefig('COADREAD/PCA_Kaplan-Meier_curve.tif', dpi=300, bbox_inches='tight')
 
 
 
 def PCA_log_ranktest(survival_df, cluster_labels):
-    print("\n不同分子分型间的Log-Rank检验结果:")
+    
     survival_df = survival_df.copy()
     survival_df['Cluster'] = cluster_labels
     
-    # 使用多组比较的Log-Rank检验(而非两两比较)
+    
     from lifelines.statistics import multivariate_logrank_test
     
-    # 进行整体的Log-Rank检验
+    
     results = multivariate_logrank_test(
         survival_df['time'], 
         survival_df['Cluster'], 
         survival_df['event']
     )
     
-    print(f"整体Log-Rank检验结果:")
-    print(f"检验统计量: {results.test_statistic:.4f}")
     
-    print(f"p值: {results.p_value:.4f}")
-    
-    # 返回结果以便进一步使用
     
     results_table = []    
     results_table.append({
-    '统计量': results.test_statistic,
-    'p值': results.p_value})
+    'Statitics': results.test_statistic,
+    'p_value': results.p_value})
         
 
-# 将Log-Rank检验结果转换为DataFrame并保存
+
     logrank_results = pd.DataFrame(results_table)
     logrank_results.to_csv('COADREAD/PCA_logrank_test_results.csv', index=False, encoding='utf_8_sig')
     return results_table
@@ -992,15 +996,15 @@ def PCA_log_ranktest(survival_df, cluster_labels):
 def PCA_compute(X_encoded, survival_df, max_clusters=10):
     significant_features, significant_indices = cox_feature_selection(X_encoded, survival_df)
     n_clusters = opti_clusters
-    print(f"\n最佳聚类数: {n_clusters}")
+    
     cluster_labels, kmeans = apply_kmeans(significant_features, n_clusters)
     
     cindex_mean, cindex_std = cv_cindex(significant_features, cv=5)
     
     unique_clusters, counts = np.unique(cluster_labels, return_counts=True)
-    print("\n聚类分布:")
+    
     for cluster, count in zip(unique_clusters, counts):
-        print(f"聚类 {cluster}: {count} 个样本")
+        
     PCA_KM_plot(survival_df, cluster_labels,cindex_mean, cindex_std)
     
     table = PCA_log_ranktest(survival_df, cluster_labels)
